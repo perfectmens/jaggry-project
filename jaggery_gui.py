@@ -35,7 +35,7 @@ def init_connection():
         conn = psycopg2.connect(
             dbname="postgres",
             user="postgres",
-            password="aura",
+            password="****", # change to actual password !!
             host="localhost",
             port=5439
         )
