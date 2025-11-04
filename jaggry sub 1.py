@@ -7,8 +7,6 @@ import psycopg2
 import pandas as pd
 import requests  # Use requests for API calls, not subprocess
 import json
-import sys
-print(sys.executable)
 
 # -------------------------------
 # Constants
@@ -21,12 +19,10 @@ OLLAMA_HOST = "http://localhost:11434"
 # Define the DB schema and prompts as constants for easy maintenance
 DB_SCHEMA_INFO = """
 This table has the following columns: batch_id, start_time (timestamp), end_time (timestamp),
-next_batch_start (timestamp).
+next_batch_start (timestamp), gap_delay (text), and status (text).
 
-
+The 'gap_delay' column can only contain one of four string values: 'normal', 'failure', 'perfect', 'cleaning_delay'.
 """
-#The 'gap_delay' column can only contain one of four string values: 'normal', 'failure', 'perfect', 'cleaning_delay'.
-
 
 SQL_GEN_PROMPT_TEMPLATE = f"""
 You are an expert data assistant with access to a PostgreSQL table named 'batch_data'.
@@ -35,7 +31,7 @@ You are an expert data assistant with access to a PostgreSQL table named 'batch_
 Your task is to convert the user's question into a safe, and syntactically correct SQL SELECT query for PostgreSQL.
 - Only generate the SQL query. Do not add any explanations, introductions, or markdown formatting like '```sql'.
 - Use proper timestamp operations like BETWEEN, >=, <=. Do not use string concatenation or LIKE on timestamps.
-- read the users question and find the relationship and corlation between the data .
+- Ensure all string comparisons for 'gap_delay' or 'status' use single quotes.
 - ONLY output SELECT queries. Never output any other command (UPDATE, DELETE, DROP, etc.).
 
 User Question: "{{question}}"
@@ -49,14 +45,13 @@ If the data is empty, inform the user that no records were found that match thei
 If the data contains an error, inform the user about the error.
 
 Database Results:
-{results}
+{{results}}
 
 User's Question:
-"{question}"
+"{{question}}"
 
 Answer:
 """
-
 
 # -------------------------------
 # Page Configuration
@@ -73,35 +68,18 @@ st.caption(f"Conversational interface for TimescaleDB, powered by Ollama ({MODEL
 
 
 # -------------------------------
-# 1️⃣ Connect to TimescaleDB
+# 1️⃣ Connect to TimescaleDB (Using Streamlit Secrets)
 # -------------------------------
-# Use st.cache_resource to only run this connection once.
 
-"""
-@st.cache_resource
-def init_connection():
-    #Initialize the connection to TimescaleDB.
-    try:
-        # NOTE: The connection details are hardcoded here for simplicity.
-        # For production environments, it's recommended to use Streamlit secrets.
-        # Create a file .streamlit/secrets.toml and add your credentials there.
-        conn = psycopg2.connect(
-            dbname="postgres",
-            user="postgres",
-            password="aura", # change to actual password !!
-            host="localhost",
-            port=5439
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Failed to connect to the database. Please ensure your TimescaleDB is running and the connection details are correct.\n\n**Error:** {e}")
-        st.stop()
-
-conn = init_connection()
-"""
-import streamlit as st
-import psycopg2
-
+# Create a file .streamlit/secrets.toml with your credentials:
+#
+# [db_credentials]
+# host = "localhost"
+# port = 5439
+# dbname = "postgres"
+# user = "postgres"
+# password = "YOUR_PASSWORD_HERE"
+#
 def init_connection():
     """Initialize the connection to TimescaleDB without caching for testing."""
     try:
@@ -121,7 +99,6 @@ def init_connection():
 
 conn = init_connection()
 # -------------------------------
-
 
 def run_query(sql_query):
     """Execute SQL query safely and return results as DataFrame."""
@@ -206,26 +183,14 @@ def answer_question(question):
     # Step 2: Run the query against the database
     df = run_query(sql_query)
     
-# Handle SQL errors gracefully (run_query returns a df with 'error' column)
-if 'error' in df.columns:
-    error_message = df['error'].iloc[0]
-    st.error(f"There was an error with the generated SQL. Please try rephrasing your question.\n\n**Error details:** {error_message}")
-    results = {"error": error_message}
-else:
-    if not df.empty:
-        # Convert all datetime columns to string for better readability
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].astype(str)
-        
-        # Safely convert DataFrame to Markdown (or fallback to plain text)
-        try:
-            results = df.to_markdown(index=False)
-        except ImportError:
-            results = df.to_string(index=False)
+    # Handle SQL errors gracefully (run_query returns a df with 'error' column)
+    if 'error' in df.columns:
+        error_message = df['error'].iloc[0]
+        st.error(f"There was an error with the generated SQL. Please try rephrasing your question.\n\n**Error details:** {error_message}")
+        # Feed the error back to the LLM so it can explain it
+        results = {"error": error_message}
     else:
-        results = "No data found."
-
+        results = df.to_dict(orient='records')
 
     # Step 3: Use the query results to generate a natural language answer
     rag_prompt = RAG_PROMPT_TEMPLATE.format(results=results, question=question)
@@ -269,3 +234,4 @@ if prompt := st.chat_input("Ask about batch times, delays, or status..."):
     
     # Add assistant's response to chat history
     st.session_state.messages.append({"role": "assistant", "content": response})
+
